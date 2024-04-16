@@ -1,0 +1,70 @@
+variables:
+  IMAGE_NAME: docker-volume-glusterfs
+  VERSION: "10"
+  REGISTRY_IMAGE: $DOCKERHUB_USER/$IMAGE_NAME
+  BUILDER_IMAGE: "${IMAGE_NAME}-builder-$CI_CONCURRENT_ID"
+
+image: docker:$DOCKER_VERSION
+
+stages:
+  - linting
+  - build
+  - publish
+
+before_script:
+  - docker login -u ${DOCKERHUB_USER} -p ${DOCKERHUB_PASSWORD}
+  # - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  - docker run --privileged --rm tonistiigi/binfmt --install all
+  - docker buildx create --use --bootstrap --name ${BUILDER_IMAGE} --config=buildkitd.toml
+after_script:
+  - docker buildx stop ${BUILDER_IMAGE}
+  - docker buildx rm ${BUILDER_IMAGE}
+
+buildkit_toml:
+  stage: .pre
+  image: alpine
+  before_script: []
+  after_script: []
+  script:
+    - apk add envsubst
+    - envsubst < buildkitd.toml.tmpl > buildkitd.toml
+  artifacts:
+    paths:
+      - buildkitd.toml
+
+.hadolint:
+  stage: linting
+  # image: ${CI_DEPENDENCY_PROXY_DIRECT_GROUP_IMAGE_PREFIX}/registry.gitlab.com/pipeline-components/hadolint:latest
+  image: registry.gitlab.com/pipeline-components/hadolint:latest
+  script:
+    - hadolint Dockerfile
+  allow_failure: true
+  rules:
+    - changes:
+        - Dockerfile
+
+build:
+  stage: build
+  script:
+    - docker buildx bake --push --file package_bake.hcl --progress plain
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - package_bake.hcl
+        - Dockerfile
+
+publish:
+  stage: publish
+  script:
+    - id=$(docker create --platform linux/arm64 ${REGISTRY_IMAGE}:${VERSION} true)
+    - mkdir -p rootfs
+    - docker export "$id" | tar -x -C rootfs
+    - docker plugin create ${REGISTRY_IMAGE}:${VERSION}-arm64 .
+    - docker plugin push ${REGISTRY_IMAGE}:${VERSION}-arm64
+    - rm -r rootfs
+    - docker plugin rm ${REGISTRY_IMAGE}:${VERSION}-arm64
+  rules:
+    - changes:
+        - .gitlab-ci.yml
+        - package_bake.hcl
+        - Dockerfile
